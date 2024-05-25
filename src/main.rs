@@ -13,8 +13,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let response = "HTTP/1.1 200 OK\r\n\r\n";
-                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
                 println!("accepted new connection");
             }
             Err(e) => {
