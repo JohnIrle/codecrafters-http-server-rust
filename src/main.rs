@@ -13,7 +13,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                handle_connection(&mut stream);
+                handle_connection(&mut stream).unwrap();
                 println!("accepted new connection");
             }
             Err(e) => {
@@ -23,13 +23,27 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: &mut TcpStream) {
+fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
     let buf_reader = BufReader::new(&mut stream);
-    let request_line = buf_reader.lines().next().unwrap().unwrap();
 
-    if request_line == "GET / HTTP/1.1" {
-        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+    if let Some(Ok(request_line)) = buf_reader.lines().next() {
+        let parts: Vec<&str> = request_line.split(' ').collect();
+
+        if let Some(path) = parts.get(1) {
+            match *path {
+                "/" => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
+                path if path.starts_with("/echo") => {
+                    let message = path.trim_start_matches("/echo").trim_start_matches('/');
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", message.len(), message).as_bytes())?;
+                }
+                _ => stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n")?,
+            }
+        } else {
+            stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?
+        }
     } else {
-        stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?
     }
+
+    Ok(())
 }
