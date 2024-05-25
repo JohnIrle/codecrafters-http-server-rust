@@ -39,15 +39,6 @@ fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
         }
     };
 
-    let user_agent = match http_request.iter().find(|line| line.starts_with("User")) {
-        Some(line) => line,
-        _ => {
-            stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
-            println!("useragent");
-            return Ok(());
-        }
-    };
-
     let parts: Vec<&str> = request.split_whitespace().collect();
     let path = match parts.get(1) {
         Some(&path) => path,
@@ -70,6 +61,14 @@ fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
             stream.write_all(response.as_bytes())?;
         }
         path if path.starts_with("/user-agent") => {
+            let user_agent = match http_request.iter().find(|line| line.starts_with("User")) {
+                Some(line) => line,
+                _ => {
+                    stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
+                    println!("useragent");
+                    return Ok(());
+                }
+            };
             let trimmed_user_agent = user_agent.trim_start_matches("User-Agent:").trim();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
