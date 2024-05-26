@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
-use std::{io, thread};
+use std::{fs, io, thread};
 
 struct Worker {
     thread: Option<thread::JoinHandle<()>>,
@@ -134,6 +134,23 @@ fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                 trimmed_user_agent.len(),
                 trimmed_user_agent
+            );
+            stream.write_all(response.as_bytes())?;
+        }
+        path if path.starts_with("/files/") => {
+            let file_name = path.replace("/files/", "");
+            let file_path = format!("/tmp/data/codecrafters.io/http-server-tester/{}", file_name);
+            let contents = fs::read_to_string(file_path);
+
+            let Ok(file) = contents else {
+                stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n")?;
+                return Ok(());
+            };
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}",
+                file.len(),
+                file
             );
             stream.write_all(response.as_bytes())?;
         }
