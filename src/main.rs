@@ -1,7 +1,8 @@
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
-use std::{fs, io, thread};
+use std::{env, fs, io, thread};
 
 struct Worker {
     thread: Option<thread::JoinHandle<()>>,
@@ -75,16 +76,26 @@ impl Drop for ThreadPool {
 }
 
 fn main() {
-    #[allow(clippy::expect_used)]
+    let args: Vec<String> = env::args().collect();
+    let dir = if args.len() > 2 {
+        args.windows(2)
+            .find(|window| window[0] == "--directory")
+            .unwrap_or_default()[1]
+            .to_owned()
+    } else {
+        String::new()
+    };
+
     let listener = TcpListener::bind("127.0.0.1:4221").expect("Could not establish TcpListener");
     let pool = ThreadPool::new(4);
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
+            Ok(stream) => {
+                let directory = dir.clone();
                 pool.execute(move || {
                     println!("accepted new connection");
-                    handle_connection(&mut stream).unwrap();
+                    handle_connection(stream, &directory).unwrap();
                 });
             }
             Err(e) => {
@@ -94,28 +105,19 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
-    let buf_reader = BufReader::new(&mut stream);
-    let http_request: Vec<_> = buf_reader
-        .lines()
-        .map(|result| result.unwrap())
-        .take_while(|line| !line.is_empty())
-        .collect();
+fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
+    let mut buf_reader = BufReader::new(&mut stream);
 
-    let Some(request) = http_request.first() else {
+    let Ok((method, path, headers)) = parse_request(&mut buf_reader) else {
         stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
         return Ok(());
     };
 
-    let parts: Vec<&str> = request.split_whitespace().collect();
-    let Some(path) = parts.get(1) else {
-        stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
-        return Ok(());
-    };
+    let parsed_headers: Vec<_> = headers.split("\r\n").collect();
 
-    match *path {
-        "/" => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
-        path if path.starts_with("/echo") => {
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/") => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
+        ("GET", path) if path.starts_with("/echo") => {
             let message = path.trim_start_matches("/echo/").to_owned();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
@@ -124,8 +126,9 @@ fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
             );
             stream.write_all(response.as_bytes())?;
         }
-        path if path.starts_with("/user-agent") => {
-            let Some(user_agent) = http_request.iter().find(|line| line.starts_with("User")) else {
+        ("GET", path) if path.starts_with("/user-agent") => {
+            let Some(user_agent) = parsed_headers.iter().find(|line| line.starts_with("User"))
+            else {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
                 return Ok(());
             };
@@ -137,9 +140,10 @@ fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
             );
             stream.write_all(response.as_bytes())?;
         }
-        path if path.starts_with("/files/") => {
+        ("GET", path) if path.starts_with("/files/") => {
             let file_name = path.replace("/files/", "");
-            let file_path = format!("/tmp/data/codecrafters.io/http-server-tester/{}", file_name);
+            let file_path = format!("{directory}/{file_name}");
+
             let contents = fs::read_to_string(file_path);
 
             let Ok(file) = contents else {
@@ -154,8 +158,74 @@ fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
             );
             stream.write_all(response.as_bytes())?;
         }
+        ("POST", path) if path.starts_with("/files/") => {
+            let file_name = path.replace("/files/", "");
+
+            let file_path = directory.to_owned() + &file_name;
+
+            let Ok(mut file) = File::create(file_path) else {
+                stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")?;
+                return Ok(());
+            };
+
+            let Some(body) = parse_body(&mut buf_reader, &headers) else {
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
+                return Ok(());
+            };
+
+            if matches!(file.write_all(body.as_bytes()), Ok(())) {
+                stream.write_all(b"HTTP/1.1 201 Created\r\n\r\n")?;
+            } else {
+                stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")?;
+                return Ok(());
+            }
+        }
         _ => stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n")?,
     }
 
     Ok(())
+}
+
+fn parse_request(
+    reader: &mut BufReader<&mut TcpStream>,
+) -> Result<(String, String, String), &'static str> {
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .map_err(|_| "Failed to read request line")?;
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+
+    if parts.len() != 3 {
+        return Err("Invalid request line");
+    }
+
+    let method = parts[0].to_owned();
+    let route = parts[1].to_owned();
+
+    let mut headers = String::new();
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|_| "Failed to read headers")?;
+        if line == "\r\n" {
+            break;
+        }
+        headers.push_str(&line);
+    }
+
+    Ok((method, route, headers))
+}
+
+fn parse_body(reader: &mut BufReader<&mut TcpStream>, headers: &str) -> Option<String> {
+    let content_length = headers
+        .lines()
+        .find(|&line| line.starts_with("Content-Length:"))
+        .and_then(|line| line.split(": ").nth(1))
+        .and_then(|len| len.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body).ok()?;
+    Some(String::from_utf8_lossy(&body).to_string())
 }
