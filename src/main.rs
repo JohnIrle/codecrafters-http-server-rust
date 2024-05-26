@@ -1,32 +1,24 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::{io, thread};
 
 struct Worker {
-    id: usize,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
+    fn new(receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
         let thread = thread::spawn(move || loop {
             let message = receiver.lock().unwrap().recv();
 
             match message {
-                Ok(job) => {
-                    println!("Worker {id} got a job; executing.");
-
-                    job();
-                }
-                Err(_) => {
-                    break;
-                }
+                Ok(job) => job(),
+                Err(_) => break,
             }
         });
 
-        Worker {
-            id,
+        Self {
             thread: Some(thread),
         }
     }
@@ -41,7 +33,7 @@ struct ThreadPool {
 
 impl ThreadPool {
     pub fn new(size: usize) -> Self {
-        assert!(size > 0);
+        assert!(size > 0, "ThreadPool size must be greater than 0");
 
         let (sender, receiver) = mpsc::channel();
 
@@ -49,8 +41,8 @@ impl ThreadPool {
 
         let mut workers = Vec::with_capacity(size);
 
-        for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&receiver)));
+        for _ in 0..size {
+            workers.push(Worker::new(Arc::clone(&receiver)));
         }
 
         Self {
@@ -75,14 +67,16 @@ impl Drop for ThreadPool {
 
         for worker in &mut self.workers {
             if let Some(thread) = worker.thread.take() {
-                thread.join().unwrap();
+                #[allow(clippy::expect_used)]
+                thread.join().expect("failed to join");
             }
         }
     }
 }
 
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+    #[allow(clippy::expect_used)]
+    let listener = TcpListener::bind("127.0.0.1:4221").expect("Could not establish TcpListener");
     let pool = ThreadPool::new(4);
 
     for stream in listener.incoming() {
@@ -100,7 +94,7 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
+fn handle_connection(mut stream: &mut TcpStream) -> io::Result<()> {
     let buf_reader = BufReader::new(&mut stream);
     let http_request: Vec<_> = buf_reader
         .lines()
@@ -108,29 +102,21 @@ fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
         .take_while(|line| !line.is_empty())
         .collect();
 
-    let request = match http_request.first() {
-        Some(line) => line,
-        _ => {
-            stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
-            println!("request");
-            return Ok(());
-        }
+    let Some(request) = http_request.first() else {
+        stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
+        return Ok(());
     };
 
     let parts: Vec<&str> = request.split_whitespace().collect();
-    let path = match parts.get(1) {
-        Some(&path) => path,
-        None => {
-            stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
-            println!("path");
-            return Ok(());
-        }
+    let Some(path) = parts.get(1) else {
+        stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
+        return Ok(());
     };
 
-    match path {
+    match *path {
         "/" => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
         path if path.starts_with("/echo") => {
-            let message = path.trim_start_matches("/echo/").to_string();
+            let message = path.trim_start_matches("/echo/").to_owned();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                 message.len(),
@@ -139,13 +125,9 @@ fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
             stream.write_all(response.as_bytes())?;
         }
         path if path.starts_with("/user-agent") => {
-            let user_agent = match http_request.iter().find(|line| line.starts_with("User")) {
-                Some(line) => line,
-                _ => {
-                    stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
-                    println!("useragent");
-                    return Ok(());
-                }
+            let Some(user_agent) = http_request.iter().find(|line| line.starts_with("User")) else {
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
+                return Ok(());
             };
             let trimmed_user_agent = user_agent.trim_start_matches("User-Agent:").trim();
             let response = format!(
@@ -155,10 +137,7 @@ fn handle_connection(mut stream: &mut TcpStream) -> std::io::Result<()> {
             );
             stream.write_all(response.as_bytes())?;
         }
-        _ => {
-            println!("last branch");
-            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n")?
-        }
+        _ => stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n")?,
     }
 
     Ok(())
