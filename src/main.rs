@@ -1,3 +1,5 @@
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -121,7 +123,8 @@ fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
         ("GET", "/") => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
         ("GET", path) if path.starts_with("/echo") => {
             let message = path.trim_start_matches("/echo/").to_owned();
-            let content_encoding_header = match parsed_headers
+            // TODO: accept more than gzip
+            if let Some(encoding) = parsed_headers
                 .iter()
                 .find_map(|line| line.strip_prefix("accept-encoding:"))
                 .and_then(|encodings| {
@@ -129,19 +132,29 @@ fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
                         .split(',')
                         .map(str::trim)
                         .find(|encoding| ACCEPTED_ENCODING.contains(encoding))
-                }) {
-                Some(encoding) => {
-                    format!("Content-Encoding: {}\r\n", encoding)
-                }
-                _ => String::new(),
+                })
+            {
+                let mut response = Vec::new();
+
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(message.as_bytes())?;
+                let compressed_message = encoder.finish()?;
+                write!(
+                    response,
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+                    encoding,
+                    compressed_message.len()
+                )?;
+                response.extend_from_slice(&compressed_message);
+                stream.write_all(&response)?;
+            } else {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    message.len(),
+                    message
+                );
+                stream.write_all(response.as_bytes())?;
             };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n{}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                content_encoding_header,
-                message.len(),
-                message
-            );
-            stream.write_all(response.as_bytes())?;
         }
         ("GET", path) if path.starts_with("/user-agent") => {
             let Some(user_agent) = parsed_headers
