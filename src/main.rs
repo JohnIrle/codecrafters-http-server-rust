@@ -123,9 +123,14 @@ fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
             let message = path.trim_start_matches("/echo/").to_owned();
             let content_encoding_header = match parsed_headers
                 .iter()
-                .find_map(|line| line.strip_prefix("Accept-Encoding:").map(str::trim))
-            {
-                Some(encoding) if ACCEPTED_ENCODING.contains(&encoding) => {
+                .find_map(|line| line.strip_prefix("accept-encoding:"))
+                .and_then(|encodings| {
+                    encodings
+                        .split(',')
+                        .map(str::trim)
+                        .find(|encoding| ACCEPTED_ENCODING.contains(encoding))
+                }) {
+                Some(encoding) => {
                     format!("Content-Encoding: {}\r\n", encoding)
                 }
                 _ => String::new(),
@@ -141,7 +146,7 @@ fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
         ("GET", path) if path.starts_with("/user-agent") => {
             let Some(user_agent) = parsed_headers
                 .iter()
-                .find_map(|line| line.strip_prefix("User-Agent:").map(str::trim))
+                .find_map(|line| line.strip_prefix("user-agent:").map(str::trim))
             else {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
                 return Ok(());
@@ -227,13 +232,13 @@ fn parse_request(
         headers.push_str(&line);
     }
 
-    Ok((method, route, headers))
+    Ok((method, route, headers.to_lowercase()))
 }
 
 fn parse_body(reader: &mut BufReader<&mut TcpStream>, headers: &str) -> Option<String> {
     let content_length = headers
         .lines()
-        .find(|&line| line.starts_with("Content-Length:"))
+        .find(|&line| line.starts_with("content-length:"))
         .and_then(|line| line.split(": ").nth(1))
         .and_then(|len| len.trim().parse::<usize>().ok())
         .unwrap_or(0);
