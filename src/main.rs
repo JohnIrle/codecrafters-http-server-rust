@@ -105,6 +105,8 @@ fn main() {
     }
 }
 
+const ACCEPTED_ENCODING: [&str; 1] = ["gzip"];
+
 fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
     let mut buf_reader = BufReader::new(&mut stream);
 
@@ -119,24 +121,35 @@ fn handle_connection(mut stream: TcpStream, directory: &str) -> io::Result<()> {
         ("GET", "/") => stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n")?,
         ("GET", path) if path.starts_with("/echo") => {
             let message = path.trim_start_matches("/echo/").to_owned();
+            let content_encoding_header = match parsed_headers
+                .iter()
+                .find_map(|line| line.strip_prefix("Accept-Encoding:").map(str::trim))
+            {
+                Some(encoding) if ACCEPTED_ENCODING.contains(&encoding) => {
+                    format!("Content-Encoding: {}\r\n", encoding)
+                }
+                _ => String::new(),
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\n{}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                content_encoding_header,
                 message.len(),
                 message
             );
             stream.write_all(response.as_bytes())?;
         }
         ("GET", path) if path.starts_with("/user-agent") => {
-            let Some(user_agent) = parsed_headers.iter().find(|line| line.starts_with("User"))
+            let Some(user_agent) = parsed_headers
+                .iter()
+                .find_map(|line| line.strip_prefix("User-Agent:").map(str::trim))
             else {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")?;
                 return Ok(());
             };
-            let trimmed_user_agent = user_agent.trim_start_matches("User-Agent:").trim();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                trimmed_user_agent.len(),
-                trimmed_user_agent
+                user_agent.len(),
+                user_agent
             );
             stream.write_all(response.as_bytes())?;
         }
